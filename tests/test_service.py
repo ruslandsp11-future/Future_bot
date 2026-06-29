@@ -40,16 +40,27 @@ class FakeChatClient:
         return iter(self.messages)
 
 
+def write_runtime_lists(tmp_path, groups, terms=("Технология",)):
+    groups_file = tmp_path / "Список групп.txt"
+    terms_file = tmp_path / "Список слов и хэштегов.txt"
+    groups_file.write_text("\n".join(groups), encoding="utf-8")
+    terms_file.write_text("\n".join(terms), encoding="utf-8")
+    return groups_file, terms_file
+
+
 def test_run_once_builds_ff_database_filters_dedupes_and_sends_digest(tmp_path):
+    groups_file, terms_file = write_runtime_lists(
+        tmp_path,
+        ("https://vk.ru/eofru", "https://vk.ru/asimovonline"),
+    )
     settings = Settings(
         vk_group_token="group-token",
         vk_user_token="user-token",
         vk_message_token="user-token",
         database_path=tmp_path / "future_bot.sqlite3",
         ff_group="world_of_futuristica",
-        source_groups=("eofru", "asimovonline"),
-        keywords=("Технология",),
-        hashtags=("#Технология",),
+        source_groups_file=groups_file,
+        terms_file=terms_file,
         target_peer_id=2_000_000_170,
         timezone="UTC",
     )
@@ -109,13 +120,15 @@ def test_run_once_builds_ff_database_filters_dedupes_and_sends_digest(tmp_path):
 
 
 def test_run_once_refreshes_ff_posts_from_latest_stored_date(tmp_path):
+    groups_file, terms_file = write_runtime_lists(tmp_path, ("eofru",))
     settings = Settings(
         vk_group_token="group-token",
         vk_user_token="user-token",
         vk_message_token="group-token",
         database_path=tmp_path / "future_bot.sqlite3",
         ff_group="world_of_futuristica",
-        source_groups=("eofru",),
+        source_groups_file=groups_file,
+        terms_file=terms_file,
         timezone="UTC",
     )
     storage = Storage(settings.database_path)
@@ -140,14 +153,55 @@ def test_run_once_refreshes_ff_posts_from_latest_stored_date(tmp_path):
     assert wall_client.calls[0] == ("world_of_futuristica", 100)
 
 
-def test_handle_allowed_chat_search_command_uses_chat_peer_and_interval(tmp_path):
+def test_run_once_reloads_groups_and_terms_files_for_each_activation(tmp_path):
+    groups_file, terms_file = write_runtime_lists(tmp_path, ("eofru",), ("Технология",))
     settings = Settings(
         vk_group_token="group-token",
         vk_user_token="user-token",
         vk_message_token="group-token",
         database_path=tmp_path / "future_bot.sqlite3",
         ff_group="world_of_futuristica",
-        source_groups=("eofru",),
+        source_groups_file=groups_file,
+        terms_file=terms_file,
+        timezone="UTC",
+    )
+    wall_client = FakeWallClient(
+        {
+            "world_of_futuristica": [],
+            "eofru": [Post(owner_id=-20, post_id=1, source_group="eofru", date=300, text="Технология")],
+            "asimovonline": [
+                Post(owner_id=-30, post_id=2, source_group="asimovonline", date=400, text="ИИ")
+            ],
+        }
+    )
+    message_client = FakeMessageClient()
+    service = FutureBotService(settings, wall_client, message_client, Storage(settings.database_path))
+
+    first = service.run_once(now=datetime(2026, 6, 28, 3, 0, tzinfo=timezone.utc))
+    groups_file.write_text("https://vk.ru/asimovonline\n", encoding="utf-8")
+    terms_file.write_text("ИИ\n", encoding="utf-8")
+    second = service.run_once(now=datetime(2026, 6, 29, 3, 0, tzinfo=timezone.utc))
+
+    assert first.keywords == ("Технология",)
+    assert second.keywords == ("ИИ",)
+    assert ("eofru", 1782529200) in wall_client.calls
+    assert ("asimovonline", 1782615600) in wall_client.calls
+    assert message_client.sent == [
+        (2_000_000_015, "1. https://vk.com/wall-20_1"),
+        (2_000_000_015, "1. https://vk.com/wall-30_2"),
+    ]
+
+
+def test_handle_allowed_chat_search_command_uses_chat_peer_and_interval(tmp_path):
+    groups_file, terms_file = write_runtime_lists(tmp_path, ("eofru",), ("ИИ",))
+    settings = Settings(
+        vk_group_token="group-token",
+        vk_user_token="user-token",
+        vk_message_token="group-token",
+        database_path=tmp_path / "future_bot.sqlite3",
+        ff_group="world_of_futuristica",
+        source_groups_file=groups_file,
+        terms_file=terms_file,
         target_peer_id=2_000_000_015,
         allowed_user_ids=(199592366,),
         timezone="UTC",
@@ -183,6 +237,7 @@ def test_handle_allowed_chat_search_command_uses_chat_peer_and_interval(tmp_path
     expected_since = int((now.replace(tzinfo=timezone.utc).timestamp())) - 5 * 24 * 60 * 60
     assert result is not None
     assert result.interval_days == 5
+    assert result.keywords == ("Технологии", "Технология")
     assert wall_client.calls[-1] == ("eofru", expected_since)
     assert message_client.sent == [
         (
@@ -199,12 +254,58 @@ def test_handle_allowed_chat_search_command_uses_chat_peer_and_interval(tmp_path
     ]
 
 
-def test_handle_chat_search_command_denies_unlisted_user(tmp_path):
+def test_empty_chat_search_command_uses_terms_file(tmp_path):
+    groups_file, terms_file = write_runtime_lists(tmp_path, ("eofru",), ("ИИ", "#роботы"))
     settings = Settings(
         vk_group_token="group-token",
         vk_user_token="user-token",
         vk_message_token="group-token",
         database_path=tmp_path / "future_bot.sqlite3",
+        ff_group="world_of_futuristica",
+        source_groups_file=groups_file,
+        terms_file=terms_file,
+        target_peer_id=2_000_000_015,
+        allowed_user_ids=(199592366,),
+        timezone="UTC",
+    )
+    source_post = Post(
+        owner_id=-20,
+        post_id=5,
+        source_group="eofru",
+        date=300,
+        text="Свежий обзор #роботы",
+    )
+    wall_client = FakeWallClient({"world_of_futuristica": [], "eofru": [source_post]})
+    message_client = FakeMessageClient()
+    service = FutureBotService(settings, wall_client, message_client, Storage(settings.database_path))
+
+    result = service.handle_chat_message(
+        IncomingMessage(
+            peer_id=2_000_000_015,
+            from_id=199592366,
+            text="/поиск по () интервал 5д",
+            date=1,
+            conversation_message_id=10,
+        ),
+        now=datetime(2026, 6, 28, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    assert result.keywords == ("ИИ",)
+    assert wall_client.calls[-1][0] == "eofru"
+    assert "Ключевые слова: ИИ." in message_client.sent[0][1]
+    assert "1. https://vk.com/wall-20_5" in message_client.sent[0][1]
+
+
+def test_handle_chat_search_command_denies_unlisted_user(tmp_path):
+    groups_file, terms_file = write_runtime_lists(tmp_path, ("eofru",))
+    settings = Settings(
+        vk_group_token="group-token",
+        vk_user_token="user-token",
+        vk_message_token="group-token",
+        database_path=tmp_path / "future_bot.sqlite3",
+        source_groups_file=groups_file,
+        terms_file=terms_file,
         allowed_user_ids=(199592366,),
         timezone="UTC",
     )
@@ -230,13 +331,15 @@ def test_handle_chat_search_command_denies_unlisted_user(tmp_path):
 
 
 def test_poll_chat_once_resolves_conversation_and_processes_new_command(tmp_path):
+    groups_file, terms_file = write_runtime_lists(tmp_path, ("eofru",))
     settings = Settings(
         vk_group_token="group-token",
         vk_user_token="user-token",
         vk_message_token="group-token",
         database_path=tmp_path / "future_bot.sqlite3",
         ff_group="world_of_futuristica",
-        source_groups=("eofru",),
+        source_groups_file=groups_file,
+        terms_file=terms_file,
         allowed_user_ids=(199592366,),
         timezone="UTC",
     )

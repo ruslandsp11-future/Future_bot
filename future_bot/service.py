@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from future_bot.config import Settings
+from future_bot.config import Settings, load_source_groups_file, load_terms_file
 from future_bot.logic import (
     IncomingMessage,
     Post,
@@ -66,8 +67,28 @@ class FutureBotService:
         self.message_client = message_client
         self.storage = storage
         self.chat_client = chat_client
+        self._run_lock = threading.Lock()
 
     def run_once(
+        self,
+        now: datetime | None = None,
+        keywords: Sequence[str] | None = None,
+        hashtags: Sequence[str] | None = None,
+        interval_days: int = 1,
+        peer_id: int | None = None,
+        include_summary: bool = False,
+    ) -> SyncResult:
+        with self._run_lock:
+            return self._run_once(
+                now=now,
+                keywords=keywords,
+                hashtags=hashtags,
+                interval_days=interval_days,
+                peer_id=peer_id,
+                include_summary=include_summary,
+            )
+
+    def _run_once(
         self,
         now: datetime | None = None,
         keywords: Sequence[str] | None = None,
@@ -81,6 +102,18 @@ class FutureBotService:
 
         current_time = now or datetime.now(ZoneInfo(self.settings.timezone))
         source_since_timestamp = int((current_time - timedelta(days=interval_days)).timestamp())
+        source_groups = load_source_groups_file(self.settings.source_groups_file)
+
+        effective_keywords = tuple(keywords or ())
+        effective_hashtags = tuple(hashtags or ())
+        if effective_keywords and hashtags is None:
+            effective_hashtags = tuple(
+                f"#{keyword.lstrip('#')}" for keyword in effective_keywords if keyword.lstrip("#")
+            )
+        if not effective_keywords and not effective_hashtags:
+            terms = load_terms_file(self.settings.terms_file)
+            effective_keywords = terms.keywords
+            effective_hashtags = terms.hashtags
 
         ff_full_import = not self.storage.has_ff_posts()
         ff_since = None if ff_full_import else self.storage.get_latest_ff_post_date()
@@ -89,13 +122,11 @@ class FutureBotService:
         LOGGER.info("Сохранено постов Формулы Футурологии: %s", len(ff_posts))
 
         source_posts: list[Post] = []
-        for group in self.settings.source_groups:
+        for group in source_groups:
             group_posts = list(self.wall_client.iter_wall_posts(group, source_since_timestamp))
             LOGGER.info("Получено постов из %s: %s", group, len(group_posts))
             source_posts.extend(group_posts)
 
-        effective_keywords = tuple(keywords or self.settings.keywords)
-        effective_hashtags = tuple(hashtags or self.settings.hashtags)
         unique_source_posts = dedupe_posts(source_posts)
         filtered_posts = filter_posts_by_terms(
             unique_source_posts,
@@ -112,7 +143,7 @@ class FutureBotService:
         )
         if include_summary:
             message = _format_sync_report(
-                keywords=effective_keywords,
+                keywords=effective_keywords or effective_hashtags,
                 interval_days=interval_days,
                 ff_posts_seen=len(ff_posts),
                 source_posts_seen=len(unique_source_posts),
@@ -161,7 +192,7 @@ class FutureBotService:
             "Получена команда поиска от пользователя %s в чате %s: слова=%s, интервал=%s д.",
             message.from_id,
             message.peer_id,
-            ", ".join(command.keywords),
+            ", ".join(command.keywords) if command.keywords else "из файла",
             command.interval_days,
         )
         return self.run_once(

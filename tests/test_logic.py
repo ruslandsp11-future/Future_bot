@@ -85,5 +85,13 @@ def test_parse_search_command_extracts_keywords_and_interval():
 
 def test_parse_search_command_ignores_unrelated_messages():
     assert parse_search_command("поиск по (Технология) интервал 5д") is None
-    assert parse_search_command("/поиск по () интервал 5д") is None
     assert parse_search_command("/поиск по (Технология) интервал 0д") is None
+
+
+def test_parse_search_command_allows_empty_terms_for_file_based_search():
+    command = parse_search_command("/поиск по () интервал 5д")
+
+    assert command is not None
+    assert command.keywords == ()
+    assert command.hashtags == ()
+    assert command.interval_days == 5

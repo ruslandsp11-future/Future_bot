@@ -151,9 +151,6 @@ def parse_search_command(text: str) -> SearchCommand | None:
         return None
 
     keywords = tuple(part.strip() for part in match.group("keywords").split(",") if part.strip())
-    if not keywords:
-        return None
-
     interval_days = int(match.group("days"))
     if interval_days <= 0:
         return None

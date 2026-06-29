@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time as time_module
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -55,3 +56,14 @@ def poll_chat_forever(service: FutureBotService, settings: Settings) -> None:
             LOGGER.exception("Ошибка проверки команд в чате")
 
         time_module.sleep(settings.command_poll_interval_seconds)
+
+
+def run_forever_with_chat_polling(service: FutureBotService, settings: Settings) -> None:
+    chat_thread = threading.Thread(
+        target=poll_chat_forever,
+        args=(service, settings),
+        name="future-bot-chat-polling",
+        daemon=True,
+    )
+    chat_thread.start()
+    run_forever(service, settings)
